@@ -4,6 +4,7 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, ChatType
@@ -44,6 +45,8 @@ TEMP_MUTES = {}
 RPS_GAMES = {}
 RPS_INVITES = {}
 CENSOR_ENABLED = {}
+CAPS_ENABLED = {}          # защита от капслока
+LINKS_ENABLED = {}         # защита от ссылок
 USERNAME_CACHE = {}
 USER_ID_TO_NAME = {}
 WARMED_CHATS = set()
@@ -430,6 +433,54 @@ def has_bad_words(text: str) -> bool:
                 if bad in flat:
                     return True
 
+    return False
+
+
+# ==================== КАПСЛОК ====================
+
+def is_caps_lock(text: str, min_len: int = 6, threshold: float = 0.7) -> bool:
+    """True, если текст выглядит как капслок."""
+    if not text:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < min_len:
+        return False
+    upper = sum(1 for c in letters if c.isupper())
+    return (upper / len(letters)) >= threshold
+
+
+# ==================== ССЫЛКИ ====================
+
+URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"']+",
+    re.IGNORECASE
+)
+
+ALLOWED_LINK_PREFIXES = (
+    "https://www.youtube.com/shorts",
+    "http://www.youtube.com/shorts",
+    "https://youtube.com/shorts",
+    "http://youtube.com/shorts",
+    "www.youtube.com/shorts",
+    "youtube.com/shorts",
+)
+
+
+def is_allowed_link(url: str) -> bool:
+    url_low = url.lower().rstrip("/")
+    for prefix in ALLOWED_LINK_PREFIXES:
+        if url_low.startswith(prefix):
+            return True
+    return False
+
+
+def has_forbidden_links(text: str) -> bool:
+    if not text:
+        return False
+    found = URL_RE.findall(text)
+    for url in found:
+        if not is_allowed_link(url):
+            return True
     return False
 
 
@@ -1087,7 +1138,9 @@ async def cmd_start(message: types.Message):
         "🧹 Чищу сервисные сообщения\n"
         "📢 Созываю всех через /everyone\n"
         "🎲 Развлекательные команды\n"
-        "🔨 Модерация\n\n"
+        "🔨 Модерация\n"
+        "🔠 Защита от капслока\n"
+        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n\n"
         "💼 Если я подключён к твоему Business-аккаунту, "
         "напиши мне в личку <code>.мут</code> или <code>.хелп</code>.\n\n"
         "📌 /help для списка команд."
@@ -1145,11 +1198,18 @@ async def cmd_help(message: types.Message):
         "• /censor — включить цензуру\n"
         "• /uncensor — выключить цензуру\n"
         "• /censor_status — статус цензуры\n"
+        "• /caps — включить защиту от капслока\n"
+        "• /uncaps — выключить защиту от капслока\n"
+        "• /caps_status — статус защиты от капслока\n"
+        "• /links — включить защиту от ссылок\n"
+        "• /unlinks — выключить защиту от ссылок\n"
+        "• /links_status — статус защиты от ссылок\n"
         "• /service_on — вкл. чистку сервисных\n"
         "• /service_off — выкл. чистку\n"
         "• /service_status — статус чистки\n\n"
         "💡 <i>Команды администрации доступны админам чата. "
-        "Отдельные пользователи из whitelist могут использовать их без прав.</i>"
+        "Отдельные пользователи из whitelist могут использовать их без прав.</i>\n\n"
+        "🔗 <i>Защита от ссылок не блокирует https://www.youtube.com/shorts</i>"
     )
 
 
@@ -1181,6 +1241,66 @@ async def cmd_censor_status(message: types.Message):
         return
     status = CENSOR_ENABLED.get(message.chat.id, True)
     await message.answer(f"Цензура: {'✅ вкл' if status else '🔓 выкл'}")
+
+
+@dp.message(Command("caps"))
+async def cmd_caps_on(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    CAPS_ENABLED[message.chat.id] = True
+    await message.answer("✅ Защита от капслока включена.")
+
+
+@dp.message(Command("uncaps"))
+async def cmd_caps_off(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    CAPS_ENABLED[message.chat.id] = False
+    await message.answer("🔓 Защита от капслока выключена.")
+
+
+@dp.message(Command("caps_status"))
+async def cmd_caps_status(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    status = CAPS_ENABLED.get(message.chat.id, False)
+    await message.answer(f"Защита от капслока: {'✅ вкл' if status else '🔓 выкл'}")
+
+
+@dp.message(Command("links"))
+async def cmd_links_on(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    LINKS_ENABLED[message.chat.id] = True
+    await message.answer("✅ Защита от ссылок включена (кроме youtube.com/shorts).")
+
+
+@dp.message(Command("unlinks"))
+async def cmd_links_off(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    LINKS_ENABLED[message.chat.id] = False
+    await message.answer("🔓 Защита от ссылок выключена.")
+
+
+@dp.message(Command("links_status"))
+async def cmd_links_status(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    status = LINKS_ENABLED.get(message.chat.id, False)
+    await message.answer(f"Защита от ссылок: {'✅ вкл' if status else '🔓 выкл'}")
 
 
 @dp.message(Command("service_on"))
@@ -1876,6 +1996,25 @@ async def filter_messages(message: types.Message):
             pass
         return
 
+    # --- Защита от капслока ---
+    if CAPS_ENABLED.get(message.chat.id, False) and is_caps_lock(message.text):
+        try:
+            await message.delete()
+            print(f"Удалён капслок от {message.from_user.id} в {message.chat.id}")
+        except Exception as e:
+            print(f"Не удалил капслок: {e}")
+        return
+
+    # --- Защита от ссылок ---
+    if LINKS_ENABLED.get(message.chat.id, False) and has_forbidden_links(message.text):
+        try:
+            await message.delete()
+            print(f"Удалена ссылка от {message.from_user.id} в {message.chat.id}")
+        except Exception as e:
+            print(f"Не удалил ссылку: {e}")
+        return
+
+    # --- Цензура мата ---
     if not CENSOR_ENABLED.get(message.chat.id, True):
         track_message(message.chat.id, message.from_user, is_bad=False)
         return
@@ -1910,6 +2049,12 @@ async def set_commands():
         types.BotCommand(command="censor", description="Вкл. цензуру"),
         types.BotCommand(command="uncensor", description="Выкл. цензуру"),
         types.BotCommand(command="censor_status", description="Статус цензуры"),
+        types.BotCommand(command="caps", description="Вкл. защиту от капслока"),
+        types.BotCommand(command="uncaps", description="Выкл. защиту от капслока"),
+        types.BotCommand(command="caps_status", description="Статус защиты от капслока"),
+        types.BotCommand(command="links", description="Вкл. защиту от ссылок"),
+        types.BotCommand(command="unlinks", description="Выкл. защиту от ссылок"),
+        types.BotCommand(command="links_status", description="Статус защиты от ссылок"),
         types.BotCommand(command="service_on", description="Вкл. чистку"),
         types.BotCommand(command="service_off", description="Выкл. чистку"),
         types.BotCommand(command="service_status", description="Статус чистки"),
